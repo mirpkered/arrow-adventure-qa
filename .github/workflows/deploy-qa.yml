@@ -1,0 +1,94 @@
+name: Deploy QA candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full 40-character commit SHA from mirpkered/arrow-adventure
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arrow-adventure-qa-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      candidate_sha: ${{ steps.candidate.outputs.sha }}
+    steps:
+      - name: Checkout QA workflow
+        uses: actions/checkout@v4
+
+      - name: Validate candidate SHA
+        id: candidate
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: |
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "candidate_sha must be a full 40-character lowercase Git SHA" >&2
+            exit 1
+          fi
+          echo "sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout selected Arrow Adventure candidate
+        uses: actions/checkout@v4
+        with:
+          repository: mirpkered/arrow-adventure
+          ref: ${{ steps.candidate.outputs.sha }}
+          path: source
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+
+      - name: Install dependencies
+        working-directory: source
+        run: npm ci
+
+      - name: Run tests and TypeScript validation
+        working-directory: source
+        run: npm test && npm run typecheck
+
+      - name: Build for isolated QA project path
+        working-directory: source
+        run: npm run build -- --base=/arrow-adventure-qa/
+
+      - name: Add QA identification and traceability
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/stamp-qa-build.mjs source/dist "$CANDIDATE_SHA" "$RUN_URL"
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload QA site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: source/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to the QA repository's Pages site
+        id: deployment
+        uses: actions/deploy-pages@v4
